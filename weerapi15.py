@@ -1,11 +1,11 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import numpy as np
 import time
 from math import radians, sin, cos, sqrt, atan2, degrees
-import matplotlib.pyplot as plt 
+import plotly.express as px
 
 # --- Globale Configuratie ---
 BASE_API_URL = "http://api.temperatur.nu/tnu_1.17.php"
@@ -15,6 +15,9 @@ REFRESH_COORDS_TTL = 3600 * 24 * 7 # 1 week
 # UW LOCATIE
 UW_LAT = 63.0243695749981
 UW_LON = 17.03321183785952
+# Locatie voor Voorspelling (Graningen, overgenomen uit grafiek5.py)
+FORECAST_LAT = 63.024625
+FORECAST_LON = 17.035304
 
 # CENTRALE STATIONSCONFIGURATIE
 STATIONS = {
@@ -142,12 +145,87 @@ def haal_historische_data_op(station_id, span_value):
     except Exception as e:
         return pd.DataFrame(), f"Onverwachte fout (Historisch): {e}"
 
+# --- FUNCTIES VOOR VOORSPELLINGEN (Ongewijzigd) ---
+
+@st.cache_data(ttl=3600)
+def get_smhi_forecast(lat, lon):
+    """Haalt temperatuurvoorspelling op van SMHI (pmp3g/latest) en filtert op 1-uurs interval."""
+    url = f"https://opendata-download-metfcst.smhi.se/api/category/pmp3g/version/2/geotype/point/lon/{lon:.4f}/lat/{lat:.4f}/data.json"
+    
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        
+        forecast_data = []
+        for item in data.get('timeSeries', []):
+            temp_param = next((param['values'][0] for param in item['parameters'] if param['name'] == 't'), None)
+            if temp_param is not None:
+                forecast_data.append({
+                    'Tijd (UTC)': pd.to_datetime(item['validTime']), 
+                    'Temperatuur (°C)': temp_param,
+                    'Bron': 'SMHI'
+                })
+
+        df = pd.DataFrame(forecast_data)
+        if not df.empty:
+            df = df.sort_values('Tijd (UTC)').reset_index(drop=True)
+            time_diffs = df['Tijd (UTC)'].diff().dt.total_seconds().fillna(0)
+            first_large_jump_index = time_diffs[time_diffs > 3600].index.min()
+            
+            if pd.notna(first_large_jump_index):
+                df = df.iloc[:first_large_jump_index]
+            
+        return df, None
+
+    except requests.exceptions.RequestException as e:
+        return pd.DataFrame(), f"Fout bij SMHI API: {e}"
+
+
+@st.cache_data(ttl=3600)
+def get_yr_forecast(lat, lon):
+    """Haalt temperatuurvoorspelling op van YR.no (MET Locationforecast 2.0) en filtert op 1-uurs interval."""
+    url = f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={lat:.4f}&lon={lon:.4f}"
+    headers = {
+        'User-Agent': 'MijnStreamlitApp/1.0.0 (https://github.com/Pillmaster)' 
+    }
+
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        
+        forecast_data = []
+        for item in data.get('properties', {}).get('timeseries', []):
+            temp_data = item.get('data', {}).get('instant', {}).get('details', {}).get('air_temperature')
+            
+            if temp_data is not None:
+                forecast_data.append({
+                    'Tijd (UTC)': pd.to_datetime(item['time']), 
+                    'Temperatuur (°C)': temp_data,
+                    'Bron': 'YR.no'
+                })
+
+        df = pd.DataFrame(forecast_data)
+        if not df.empty:
+            df = df.sort_values('Tijd (UTC)').reset_index(drop=True)
+            time_diffs = df['Tijd (UTC)'].diff().dt.total_seconds().fillna(0)
+            first_large_jump_index = time_diffs[time_diffs > 3600].index.min()
+            
+            if pd.notna(first_large_jump_index):
+                df = df.iloc[:first_large_jump_index]
+
+        return df, None
+
+    except requests.exceptions.RequestException as e:
+        return pd.DataFrame(), f"Fout bij YR.no API: {e}"
+
 
 # --- Dashboard UI Logica ---
 
 st.set_page_config(
     page_title="Multi-Station Weer Dashboard",
-    layout="wide",
+    layout="wide"
 )
 
 st.title("❄️ Multi-Station Weer Dashboard")
@@ -189,6 +267,9 @@ with st.sidebar:
         index=0
     )
     
+    # NIEUWE CHECKBOX VOOR VOORSPELLING (STANDAARD UIT)
+    forecast_enabled = st.checkbox("Toon Weersvoorspelling (SMHI / YR.no)", value=False) # <- Aangepast naar False
+
     st.divider()
     st.markdown("ℹ️ Dashboard toont data van Trafikverket VViS.")
     st.markdown(f"Aantal beschikbare stations: **{len(STATIONS)}** (Vaste selectie)")
@@ -323,38 +404,174 @@ else:
 
     st.divider()
     
-    # Deel 3: Grafiek
-    st.subheader(f"📈 Temperatuurverloop")
+    # Deel 3: Historische Grafiek
+    st.subheader(f"📈 Historisch Temperatuurverloop")
 
     if not alle_historie_df.empty:
         
-        fig, ax = plt.subplots(figsize=(12, 6))
+        # Herformateer naar 'long' format voor Plotly Express
+        plot_df = alle_historie_df.reset_index().melt(
+            id_vars='Timestamp', 
+            value_vars=alle_historie_df.columns, 
+            var_name='Station', 
+            value_name='Temperatuur (°C)'
+        ).dropna(subset=['Temperatuur (°C)'])
+
+        fig_historie = px.line(
+            plot_df, 
+            x='Timestamp', 
+            y='Temperatuur (°C)', 
+            color='Station', 
+            title=f"Temperatuurverloop over {keuze_label_tijd}",
+            markers=False, 
+            hover_data={'Timestamp': "|%Y-%m-%d %H:%M", 'Temperatuur (°C)': ':.1f'}
+        )
         
-        alle_historie_df.plot(ax=ax, linewidth=2, alpha=0.8)
-            
-        ax.axhline(0, color='red', linestyle='--', linewidth=1.5, label='0°C')
+        fig_historie.add_hline(y=0, line_dash="dot", line_color="red", annotation_text="0°C")
+
+        fig_historie.update_xaxes(
+            tickformat="%d-%m %H:%M", 
+            showgrid=True,
+            gridcolor='#eeeeee',
+            title='Tijdstip (UTC)'
+        )
         
-        ax.set_title(f"Temperatuurverloop over {keuze_label_tijd}")
-        ax.set_ylabel("Temperatuur (°C)")
-        ax.grid(True, linestyle=':', alpha=0.6)
-        ax.legend(loc='upper left')
-        
-        plt.xticks(rotation=30, ha='right')
-        plt.tight_layout()
-        
-        st.pyplot(fig)
-        
-        with st.expander(f"Toon Ruwe Geconsolideerde Data ({keuze_label_tijd})"):
-             st.dataframe(alle_historie_df.tail(20), use_container_width=True)
-            
+        fig_historie.update_layout(
+            yaxis_title="Temperatuur (°C)",
+            margin=dict(b=70) 
+        )
+
+        st.plotly_chart(fig_historie, use_container_width=True) 
+
     else:
         st.warning("Er is geen geldige historische data beschikbaar voor de geselecteerde stations en periode.")
         
     for melding in foutmeldingen:
          st.error(melding)
+    
+    st.divider()
+
+    # --- Deel 4: Voorspellingsgrafiek (Ingepakt met checkbox) ---
+    if forecast_enabled:
+        
+        # 1. Titel is nu "Voorspelde Temperatuur (°C)" met subtext eronder
+        
+        # 2. Haal data op
+        df_smhi, err_smhi = get_smhi_forecast(FORECAST_LAT, FORECAST_LON)
+        df_yr, err_yr = get_yr_forecast(FORECAST_LAT, FORECAST_LON)
+
+        # 3. Toon foutmeldingen
+        if err_smhi:
+            st.error(f"SMHI Voorspellingsfout: {err_smhi}")
+        if err_yr:
+            st.error(f"YR.no Voorspellingsfout: {err_yr}")
+
+        # 4. Combineer DataFrames
+        all_dfs = [df for df in [df_smhi, df_yr] if not df.empty]
+
+        if all_dfs:
+            combined_df = pd.concat(all_dfs).reset_index(drop=True)
+            
+            duration_seconds = (combined_df['Tijd (UTC)'].max() - combined_df['Tijd (UTC)'].min()).total_seconds()
+            duration_hours = round(duration_seconds / 3600)
+            
+            st.subheader("Voorspelde Temperatuur (°C)") # <- Hoofdtitel
+
+            # 2. Plaatsing beschrijving aangepast: NU onder de subheader
+            st.markdown(f"Toont de **voorspelde temperatuur** voor de komende **{duration_hours} uur** (1-uurs interval) op **{FORECAST_LAT:.4f} N, {FORECAST_LON:.4f} E** (nabij Graningen).")
+
+            # 5. Plotten met Plotly Express 
+            fig_voorspelling = px.line(
+                combined_df, 
+                x='Tijd (UTC)', 
+                y='Temperatuur (°C)', 
+                color='Bron', 
+                title=None,
+                markers=True,
+                hover_data={
+                    'Tijd (UTC)': "|%Y-%m-%d %H:%M",
+                    'Temperatuur (°C)': ':.1f',
+                    'Bron': True
+                }
+            )
+
+            # 5a. Optimalisatie van de X-as voor uren
+            fig_voorspelling.update_xaxes(
+                tickformat="%H:%M", 
+                dtick=4 * 60 * 60 * 1000, # Toon labels om de 4 uur (in milliseconden)
+                showgrid=True,
+                gridcolor='#eeeeee',
+                title='Tijd (UTC)'
+            )
+            
+            fig_voorspelling.add_hline(y=0, line_dash="dot", line_color="red", annotation_text="0°C")
+
+
+            # 5b. Toevoegen van de verticale dagwissellijnen en datumannotaties
+            midnight_data = combined_df[combined_df['Tijd (UTC)'].dt.hour == 0].drop_duplicates(subset=['Tijd (UTC)'])
+
+            shapes = []
+            annotations = []
+
+            min_y = combined_df['Temperatuur (°C)'].min() if not combined_df.empty else -5 
+            max_y = combined_df['Temperatuur (°C)'].max() if not combined_df.empty else 5
+
+            for index, row in midnight_data.iterrows():
+                day_start_time = row['Tijd (UTC)']
+                date_label = day_start_time.strftime('%d-%m')
+                
+                # 1. Verticale stippellijn
+                shapes.append(
+                    dict(
+                        type="line",
+                        xref="x", yref="y",
+                        x0=day_start_time, y0=min_y - 1,
+                        x1=day_start_time, y1=max_y + 1,
+                        line=dict(color="LightGrey", width=1, dash="dot")
+                    )
+                )
+                
+                # 2. Datum label als annotatie (onder de grafieklijn)
+                annotations.append(
+                    dict(
+                        x=day_start_time, 
+                        y=min_y - 2, 
+                        xref="x", yref="y",
+                        text=f'<b>{date_label}</b>', 
+                        showarrow=False,
+                        font=dict(size=12, color="#333333"),
+                        xanchor='center', 
+                        yanchor='top'
+                    )
+                )
+
+            # 5c. Update de layout
+            fig_voorspelling.update_layout(
+                shapes=shapes,
+                annotations=annotations,
+                yaxis_title="Temperatuur (°C)",
+                margin=dict(b=70) 
+            )
+
+            # 5d. Tonen van de grafiek
+            st.plotly_chart(fig_voorspelling, use_container_width=True)
+
+            # 6. Ruwe Historische Data en Voorspellingsdata onder de tweede grafiek (Ongewijzigd t.o.v. vorige versie)
+            with st.expander("Toon Ruwe Data (Historisch & Voorspelling)"):
+                st.markdown(f"#### Historische Data ({keuze_label_tijd})")
+                if not alle_historie_df.empty:
+                    st.dataframe(alle_historie_df.tail(20), use_container_width=True)
+                else:
+                    st.info("Geen historische data beschikbaar om te tonen.")
+                    
+                st.markdown(f"#### Voorspellingsdata (SMHI & YR.no)")
+                st.dataframe(combined_df.sort_values('Tijd (UTC)').head(100), use_container_width=True)
+            
+        else:
+            st.warning("Kon geen voorspellingsgegevens ophalen van beide API's. Controleer de foutmeldingen hierboven.")
+
+
          
 # --- Automatisch verversen d.m.v. Streamlit Rerun ---
-# Wacht het ingestelde interval af en dwing de app opnieuw te draaien.
-# Dit zorgt ervoor dat de gecachte data (na 5 min) en de hele pagina ververst worden.
 time.sleep(REFRESH_INTERVAL_SECONDS)
 st.rerun()
