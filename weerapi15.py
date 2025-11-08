@@ -1,11 +1,12 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone 
 import numpy as np
 import time
 from math import radians, sin, cos, sqrt, atan2, degrees
 import plotly.express as px
+import altair as alt # <<< NIEUW: Altair geïmporteerd
 
 # --- Globale Configuratie ---
 BASE_API_URL = "http://api.temperatur.nu/tnu_1.17.php"
@@ -145,7 +146,7 @@ def haal_historische_data_op(station_id, span_value):
     except Exception as e:
         return pd.DataFrame(), f"Onverwachte fout (Historisch): {e}"
 
-# --- FUNCTIES VOOR VOORSPELLINGEN (Ongewijzigd) ---
+# --- FUNCTIES VOOR KORTE TERMIJN VOORSPELLINGEN (Plotly) ---
 
 @st.cache_data(ttl=3600)
 def get_smhi_forecast(lat, lon):
@@ -219,7 +220,230 @@ def get_yr_forecast(lat, lon):
 
     except requests.exceptions.RequestException as e:
         return pd.DataFrame(), f"Fout bij YR.no API: {e}"
+        
+# --- NIEUWE FUNCTIES VOOR LANGE TERMIJN VOORSPELLINGEN (Altair) ---
+# Mapping voor neerslag categorieën (pcat)
+PRECIP_CATEGORIES = {
+    0: 'Geen Neerslag', 1: 'Sneeuw', 2: 'Sneeuw/Regen', 3: 'Regen', 
+    4: 'Motregen', 5: 'IJzel', 6: 'Vriezende Regen'
+}
 
+@st.cache_data(ttl=3600)
+def fetch_long_term_smhi_data(lat, lon):
+    """Haalt uitgebreide weersvoorspelling op van de SMHI API en verwerkt deze."""
+    # Gebruik een lichte afronding voor de API URL
+    url = (
+        f"https://opendata-download-metfcst.smhi.se/api/category/pmp3g/version/2/geotype/point/"
+        f"lon/{lon:.4f}/lat/{lat:.4f}/data.json"
+    )
+    
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status() 
+        data = response.json()
+    except requests.exceptions.RequestException as e:
+        return None, None, f"Fout bij SMHI (Lange Termijn) API: {e}"
+
+    approved_time_utc = data.get('approvedTime')
+    approved_time_formatted = None
+    if approved_time_utc:
+        try:
+            # Converteer UTC-tijd naar de lokale tijdzone (Stockholm)
+            dt_utc = datetime.fromisoformat(approved_time_utc.replace('Z', '+00:00'))
+            # stuur het door met UTC in de naam, de grafiek zal het verwerken
+            approved_time_formatted = dt_utc.astimezone(timezone(timedelta(hours=1))).strftime("%A %d %B %Y om %H:%M uur (CET/CEST)")
+        except ValueError:
+            approved_time_formatted = None
+
+    forecast_data = []
+
+    for entry in data.get('timeSeries', []):
+        time_utc = entry['validTime']
+        
+        params = {p['name']: p['values'][0] for p in entry['parameters']}
+        
+        temperature = params.get('t')
+        wind_speed = params.get('ws')
+        wind_direction = params.get('wd')
+        precip_category = params.get('pcat')
+        precip_mean = params.get('pmean')
+
+        if temperature is not None and wind_speed is not None:
+            forecast_data.append({
+                'Datum/Tijd (UTC)': datetime.fromisoformat(time_utc.replace('Z', '+00:00')), # Blijf UTC-aware
+                'Temperatuur (°C)': temperature,
+                'Wind Snelheid (m/s)': wind_speed,
+                'Wind Richting (gr)': wind_direction,
+                'Neerslag (mm/h)': precip_mean,
+                'Neerslag Type': PRECIP_CATEGORIES.get(precip_category, 'Onbekend'),
+                'Temp > 0': temperature > 0 
+            })
+
+    if not forecast_data:
+        return None, approved_time_formatted, "Geen bruikbare voorspellingsgegevens gevonden."
+        
+    df = pd.DataFrame(forecast_data)
+    
+    # Filter de data voor de komende ~10 dagen
+    end_time = datetime.now(timezone.utc) + timedelta(days=10)
+    df = df[df['Datum/Tijd (UTC)'] <= end_time].copy()
+    
+    # Converteer naar lokale tijdzone (Stockholm) voor de Altair plot X-as
+    df['Datum/Tijd'] = df['Datum/Tijd (UTC)'].dt.tz_localize('UTC').dt.tz_convert('Europe/Stockholm')
+
+
+    return df, approved_time_formatted, "OK"
+
+
+def create_temp_chart(df):
+    """
+    Grafiek voor temperatuur met geïnterpoleerde punten op de 0°C-as.
+    """
+    df_temp = df.copy()
+
+    # --- Stap 1: Interpoleren van 0°C kruispunten (overgenomen van weergraf4.py) ---
+    df_temp['sign'] = df_temp['Temperatuur (°C)'].apply(lambda x: 1 if x > 0 else -1)
+    df_temp['sign_change'] = (df_temp['sign'] != df_temp['sign'].shift(-1)) & (df_temp['sign'].shift(-1).notna())
+
+    zero_crossings = []
+    
+    for index, row in df_temp[df_temp['sign_change']].iterrows():
+        t1 = row['Temperatuur (°C)']
+        time1 = row['Datum/Tijd'] # Lokale tijd
+        
+        if index + 1 in df_temp.index:
+            t2 = df_temp.loc[index + 1, 'Temperatuur (°C)']
+            time2 = df_temp.loc[index + 1, 'Datum/Tijd'] # Lokale tijd
+            
+            fraction = abs(t1) / (abs(t1) + abs(t2))
+            time_zero = time1 + (time2 - time1) * fraction
+            
+            zero_crossings.append({
+                'Datum/Tijd': time_zero,
+                'Temperatuur (°C)': 0.0,
+                # Alleen de benodigde kolommen toevoegen, de gesplitste kolommen worden later gemaakt
+            })
+
+    if zero_crossings:
+        # Belangrijk: De index moet de 'Datum/Tijd' kolom bevatten om samen te voegen
+        df_crossings = pd.DataFrame(zero_crossings)
+        df_temp = pd.concat([df_temp.drop(columns=['sign', 'sign_change', 'Datum/Tijd (UTC)']), df_crossings], ignore_index=True)
+        df_temp = df_temp.sort_values(by='Datum/Tijd').reset_index(drop=True)
+        
+    # --- Stap 2: Splitsen voor Altair plotten (met NaN/None) ---
+
+    df_temp['Temp_Rood'] = df_temp.apply(
+        lambda row: row['Temperatuur (°C)'] if row['Temperatuur (°C)'] > 0 else (0.0 if row['Temperatuur (°C)'] == 0.0 else None),
+        axis=1
+    )
+    
+    df_temp['Temp_Blauw'] = df_temp.apply(
+        lambda row: row['Temperatuur (°C)'] if row['Temperatuur (°C)'] <= 0 else (0.0 if row['Temperatuur (°C)'] == 0.0 else None), 
+        axis=1
+    )
+    
+    # --- Stap 3: Altair plotten ---
+
+    base = alt.Chart(df_temp).encode(
+        x=alt.X('Datum/Tijd', axis=alt.Axis(title='Tijd (Lokaal: CET/CEST)', format="%a %d %H:%M")),
+        tooltip=[
+            alt.Tooltip('Datum/Tijd', title='Tijd', format="%a %d-%m %H:%M"),
+            alt.Tooltip('Temperatuur (°C)', format='.1f')
+        ],
+    ).properties(
+        title='Temperatuur Voorspelling (Rood > 0°C, Blauw ≤ 0°C)'
+    )
+
+    chart_red = base.mark_line(point={'filled': True, 'size': 60}).encode(
+        y=alt.Y('Temp_Rood', title='Temperatuur (°C)'), 
+        color=alt.value('red')
+    )
+
+    chart_blue = base.mark_line(point={'filled': True, 'size': 60}).encode(
+        y=alt.Y('Temp_Blauw', title='Temperatuur (°C)'), 
+        color=alt.value('blue')
+    )
+
+    zero_line = alt.Chart(pd.DataFrame({'y': [0]})).mark_rule(
+        color='black', 
+        size=2        
+    ).encode(
+        y='y'
+    )
+    
+    chart = (chart_red + chart_blue + zero_line).interactive()
+
+    return chart
+
+
+def create_precipitation_chart(df):
+    """Grafiek voor neerslag."""
+    precip_df = df[df['Neerslag (mm/h)'] > 0.0].copy()
+    
+    if precip_df.empty:
+         return alt.Chart(pd.DataFrame({'Tijd': [''], 'Neerslag (mm/h)': [0]})).mark_text(
+            align='center', baseline='middle', fontSize=18, text='Geen Neerslag Voorspeld'
+        ).encode()
+
+    chart = alt.Chart(precip_df).mark_bar(color='blue').encode(
+        x=alt.X('Datum/Tijd', axis=alt.Axis(title='Tijd (Lokaal: CET/CEST)', format="%a %d %H:%M")),
+        y=alt.Y('Neerslag (mm/h)', title='Neerslag (mm/h)'),
+        color=alt.Color('Neerslag Type', title='Type'),
+        tooltip=[
+            alt.Tooltip('Datum/Tijd', title='Tijd', format="%a %d-%m %H:%M"),
+            alt.Tooltip('Neerslag (mm/h)', format='.2f'),
+            alt.Tooltip('Neerslag Type')
+        ]
+    ).properties(title='Neerslag Voorspelling (mm/h)').interactive()
+    return chart
+
+def create_wind_chart(df):
+    """
+    Grafiek voor wind Snelheid (Lijn) en Richting (Pijlen op een vaste, negatieve positie).
+    """
+    df_chart = df.copy()
+    # Voeg een constante kolom toe voor de vaste Y-positie van de pijlen (op -0.5 m/s)
+    df_chart['Pijl_Positie'] = -0.5 
+    
+    base = alt.Chart(df_chart).encode(
+        x=alt.X('Datum/Tijd', axis=alt.Axis(title='Tijd (Lokaal: CET/CEST)', format="%a %d %H:%M")),
+        y=alt.Y('Wind Snelheid (m/s)', title='Wind Snelheid (m/s)', scale=alt.Scale(zero=False))
+    )
+    
+    wind_line = base.mark_line(point={'filled': True, 'size': 50}, color='gray').encode(
+        tooltip=[
+            alt.Tooltip('Datum/Tijd', title='Tijd', format="%a %d-%m %H:%M"),
+            alt.Tooltip('Wind Snelheid (m/s)', format='.1f'),
+            alt.Tooltip('Wind Richting (gr)', format='.0f')
+        ]
+    )
+    
+    wind_arrows = base.mark_point(
+        size=300,            
+        shape="arrow",       
+        color='black'
+    ).encode(
+        y=alt.Y('Pijl_Positie'), 
+        angle=alt.Angle('Wind Richting (gr)', title='Richting'),
+        tooltip=[
+            alt.Tooltip('Datum/Tijd', title='Tijd', format="%a %d-%m %H:%M"),
+            alt.Tooltip('Wind Snelheid (m/s)', format='.1f'), 
+            alt.Tooltip('Wind Richting (gr)', format='.0f')
+        ]
+    )
+    
+    zero_line = alt.Chart(pd.DataFrame({'y': [0]})).mark_rule(
+        color='black', 
+        size=2        
+    ).encode(
+        y='y'
+    )
+    
+    chart = (wind_line + wind_arrows + zero_line).properties(
+        title='Wind Snelheid (Lijn) en Richting (Pijlen)'
+    ).interactive()
+
+    return chart
 
 # --- Dashboard UI Logica ---
 
@@ -267,8 +491,11 @@ with st.sidebar:
         index=0
     )
     
-    # NIEUWE CHECKBOX VOOR VOORSPELLING (STANDAARD UIT)
-    forecast_enabled = st.checkbox("Toon Weersvoorspelling (SMHI / YR.no)", value=False) # <- Aangepast naar False
+    # NIEUWE CHECKBOX VOOR KORTE TERMIJN VOORSPELLING (PLOTLY)
+    forecast_enabled = st.checkbox("Toon Korte Termijn Voorspelling (SMHI / YR.no)", value=False) 
+    
+    # NIEUWE CHECKBOX VOOR LANGE TERMIJN VOORSPELLING (ALTAIR)
+    long_term_forecast_enabled = st.checkbox("Toon Uitgebreide SMHI-voorspelling (7-10 dagen)", value=False) # <<< NIEUW
 
     st.divider()
     st.markdown("ℹ️ Dashboard toont data van Trafikverket VViS.")
@@ -433,7 +660,7 @@ else:
             tickformat="%d-%m %H:%M", 
             showgrid=True,
             gridcolor='#eeeeee',
-            title='Tijd (Lokaal: CET/CEST)' # <- TITEL AANGEPAST
+            title='Tijd (Lokaal: CET/CEST)' 
         )
         
         fig_historie.update_layout(
@@ -451,77 +678,69 @@ else:
     
     st.divider()
 
-    # --- Deel 4: Voorspellingsgrafiek (Ingepakt met checkbox) ---
+    # --- Deel 4: Korte Termijn Voorspellingsgrafiek (Plotly) ---
     if forecast_enabled:
         
-        # 1. Titel is nu "Voorspelde Temperatuur (°C)" met subtext eronder
-        
-        # 2. Haal data op
+        st.header("Korte Termijn Voorspelling (1-uurs interval)")
+
+        # 1. Haal data op
         df_smhi, err_smhi = get_smhi_forecast(FORECAST_LAT, FORECAST_LON)
         df_yr, err_yr = get_yr_forecast(FORECAST_LAT, FORECAST_LON)
 
-        # 3. Toon foutmeldingen
+        # 2. Toon foutmeldingen
         if err_smhi:
-            st.error(f"SMHI Voorspellingsfout: {err_smhi}")
+            st.error(f"SMHI Korte Termijn Voorspellingsfout: {err_smhi}")
         if err_yr:
-            st.error(f"YR.no Voorspellingsfout: {err_yr}")
+            st.error(f"YR.no Korte Termijn Voorspellingsfout: {err_yr}")
 
-        # 4. Combineer DataFrames
+        # 3. Combineer DataFrames
         all_dfs = [df for df in [df_smhi, df_yr] if not df.empty]
 
         if all_dfs:
             combined_df = pd.concat(all_dfs).reset_index(drop=True)
             
             # --- START CORRECTIE: UTC NAAR LOKALE TIJD (EUROPE/STOCKHOLM) ---
-            
-            # De kolom 'Tijd (UTC)' is al tz-aware (UTC) door pd.to_datetime in de API-functies. 
-            # We hoeven nu alleen direct te converteren om de TypeError op te lossen.
-            
-            # 1. Converteer de bestaande, tz-aware 'Tijd (UTC)' direct naar de lokale tijdzone
-            combined_df['Tijd (Lokaal)'] = combined_df['Tijd (UTC)'].dt.tz_convert('Europe/Stockholm')
-            # 2. Stel de nieuwe X-as kolomnaam in
+            combined_df['Tijd (Lokaal)'] = combined_df['Tijd (UTC)'].dt.tz_localize('UTC').dt.tz_convert('Europe/Stockholm')
             combined_time_column = 'Tijd (Lokaal)'
-            
             # --- EINDE CORRECTIE ---
 
             duration_seconds = (combined_df['Tijd (UTC)'].max() - combined_df['Tijd (UTC)'].min()).total_seconds()
             duration_hours = round(duration_seconds / 3600)
             
-            st.subheader("Voorspelde Temperatuur (°C)") # <- Hoofdtitel
+            st.subheader("Voorspelde Temperatuur (°C)") 
 
-            # 2. Plaatsing beschrijving aangepast: NU onder de subheader
-            st.markdown(f"Toont de **voorspelde temperatuur** voor de komende **{duration_hours} uur** (1-uurs interval) op **{FORECAST_LAT:.4f} N, {FORECAST_LON:.4f} E** (nabij Graningen). **Tijden in lokale zone (CET/CEST).**") # <- Beschrijving aangepast
+            # 4. Plaatsing beschrijving aangepast
+            st.markdown(f"Toont de **voorspelde temperatuur** voor de komende **{duration_hours} uur** (1-uurs interval) op **{FORECAST_LAT:.4f} N, {FORECAST_LON:.4f} E** (nabij Graningen). **Tijden in lokale zone (CET/CEST).**")
 
             # 5. Plotten met Plotly Express 
             fig_voorspelling = px.line(
                 combined_df, 
-                x=combined_time_column, # <- GEWIJZIGDE KOLOM
+                x=combined_time_column, 
                 y='Temperatuur (°C)', 
                 color='Bron', 
                 title=None,
                 markers=True,
                 hover_data={
-                    combined_time_column: "|%Y-%m-%d %H:%M", # <- GEWIJZIGDE KOLOM
+                    combined_time_column: "|%Y-%m-%d %H:%M", 
                     'Temperatuur (°C)': ':.1f',
                     'Bron': True
                 }
             )
 
-            # 5a. Optimalisatie van de X-as voor uren
+            # 5a. Optimalisatie van de X-as
             fig_voorspelling.update_xaxes(
                 tickformat="%H:%M", 
-                dtick=4 * 60 * 60 * 1000, # Toon labels om de 4 uur (in milliseconden)
+                dtick=4 * 60 * 60 * 1000, 
                 showgrid=True,
                 gridcolor='#eeeeee',
-                title='Tijd (Lokaal: CET/CEST)' # <- TITEL AANGEPAST
+                title='Tijd (Lokaal: CET/CEST)'
             )
             
             fig_voorspelling.add_hline(y=0, line_dash="dot", line_color="red", annotation_text="0°C")
 
 
             # 5b. Toevoegen van de verticale dagwissellijnen en datumannotaties
-            # De filtering moet nu op de LOKALE tijdkolom gebeuren
-            midnight_data = combined_df[combined_df[combined_time_column].dt.hour == 0].drop_duplicates(subset=[combined_time_column]) # <- GEWIJZIGDE KOLOM
+            midnight_data = combined_df[combined_df[combined_time_column].dt.hour == 0].drop_duplicates(subset=[combined_time_column]) 
 
             shapes = []
             annotations = []
@@ -530,7 +749,7 @@ else:
             max_y = combined_df['Temperatuur (°C)'].max() if not combined_df.empty else 5
 
             for index, row in midnight_data.iterrows():
-                day_start_time = row[combined_time_column] # <- GEWIJZIGDE KOLOM
+                day_start_time = row[combined_time_column] 
                 date_label = day_start_time.strftime('%d-%m')
                 
                 # 1. Verticale stippellijn
@@ -544,7 +763,7 @@ else:
                     )
                 )
                 
-                # 2. Datum label als annotatie (onder de grafieklijn)
+                # 2. Datum label als annotatie
                 annotations.append(
                     dict(
                         x=day_start_time, 
@@ -569,23 +788,60 @@ else:
             # 5d. Tonen van de grafiek
             st.plotly_chart(fig_voorspelling, use_container_width=True)
 
-            # 6. Ruwe Historische Data en Voorspellingsdata onder de tweede grafiek (Ongewijzigd t.o.v. vorige versie)
-            with st.expander("Toon Ruwe Data (Historisch & Voorspelling)"):
-                st.markdown(f"#### Historische Data ({keuze_label_tijd})")
-                if not alle_historie_df.empty:
-                    st.dataframe(alle_historie_df.tail(20), use_container_width=True)
-                else:
-                    st.info("Geen historische data beschikbaar om te tonen.")
-                    
-                st.markdown(f"#### Voorspellingsdata (SMHI & YR.no)")
-                # Toon beide tijdskolommen in de ruwe data ter controle
-                st.dataframe(combined_df.sort_values(combined_time_column).head(100), use_container_width=True) # <- GEWIJZIGDE SORTERING
+            # 6. Ruwe data
+            with st.expander("Toon Ruwe Data (Korte Termijn Voorspelling)"):
+                st.dataframe(combined_df.sort_values(combined_time_column).head(100), use_container_width=True)
             
         else:
-            st.warning("Kon geen voorspellingsgegevens ophalen van beide API's. Controleer de foutmeldingen hierboven.")
+            st.warning("Kon geen korte termijn voorspellingsgegevens ophalen van beide API's.")
 
+    st.divider()
+    
+    # --- Deel 5: LANGE TERMIJN VOORSPELLINGSGRAFIEK (Altair, overgenomen van weergraf4.py) ---
+    if long_term_forecast_enabled: # <<< NIEUWE CHECK
+        
+        st.header("🗓️ Uitgebreide SMHI-voorspelling (7-10 dagen)")
+        
+        df_long_term, approved_time, status_msg = fetch_long_term_smhi_data(FORECAST_LAT, FORECAST_LON)
 
-         
+        if status_msg != "OK":
+            st.error(status_msg)
+        
+        if df_long_term is not None and not df_long_term.empty:
+            
+            caption_text = f"Data via SMHI Open Data API voor **{FORECAST_LAT:.4f} N, {FORECAST_LON:.4f} E**."
+            if approved_time:
+                caption_text += f" Generatie SMHI-model: **{approved_time}**."
+            st.caption(caption_text)
+            
+            st.markdown("---")
+
+            # 1. Temperatuur Grafiek
+            st.subheader("1. Temperatuur Voorspelling")
+            st.altair_chart(create_temp_chart(df_long_term), use_container_width=True)
+            
+            st.markdown("---")
+
+            # 2. Neerslag Grafiek
+            st.subheader("2. Neerslag Voorspelling")
+            st.altair_chart(create_precipitation_chart(df_long_term), use_container_width=True)
+            
+            st.markdown("---")
+
+            # 3. Wind Grafiek
+            st.subheader("3. Wind Snelheid en Richting")
+            st.altair_chart(create_wind_chart(df_long_term), use_container_width=True)
+            
+            st.markdown("---")
+            
+            with st.expander("Toon Ruwe Data (Lange Termijn Voorspelling)"):
+                # Toon de lokale tijd kolom in de ruwe data voor consistentie
+                st.dataframe(df_long_term.head(50), use_container_width=True)
+                
+        elif df_long_term is not None and df_long_term.empty:
+            st.warning("Er zijn geen recente voorspellingen beschikbaar voor de opgegeven periode.")
+            
+
 # --- Automatisch verversen d.m.v. Streamlit Rerun ---
 time.sleep(REFRESH_INTERVAL_SECONDS)
 st.rerun()
