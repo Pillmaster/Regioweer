@@ -6,7 +6,7 @@ import numpy as np
 import time
 from math import radians, sin, cos, sqrt, atan2, degrees
 import plotly.express as px
-import altair as alt # <<< NIEUW: Altair geïmporteerd
+import altair as alt
 
 # --- Globale Configuratie ---
 BASE_API_URL = "http://api.temperatur.nu/tnu_1.17.php"
@@ -270,7 +270,8 @@ def fetch_long_term_smhi_data(lat, lon):
 
         if temperature is not None and wind_speed is not None:
             forecast_data.append({
-                'Datum/Tijd (UTC)': datetime.fromisoformat(time_utc.replace('Z', '+00:00')), # Blijf UTC-aware
+                # Deze kolom is nu een tijdzone-aware datetime-object (UTC)
+                'Datum/Tijd (UTC)': datetime.fromisoformat(time_utc.replace('Z', '+00:00')), 
                 'Temperatuur (°C)': temperature,
                 'Wind Snelheid (m/s)': wind_speed,
                 'Wind Richting (gr)': wind_direction,
@@ -288,8 +289,8 @@ def fetch_long_term_smhi_data(lat, lon):
     end_time = datetime.now(timezone.utc) + timedelta(days=10)
     df = df[df['Datum/Tijd (UTC)'] <= end_time].copy()
     
-    # Converteer naar lokale tijdzone (Stockholm) voor de Altair plot X-as
-    df['Datum/Tijd'] = df['Datum/Tijd (UTC)'].dt.tz_localize('UTC').dt.tz_convert('Europe/Stockholm')
+    # FIX: Verwijder tz_localize, omdat de kolom al tz-aware is (UTC)
+    df['Datum/Tijd'] = df['Datum/Tijd (UTC)'].dt.tz_convert('Europe/Stockholm')
 
 
     return df, approved_time_formatted, "OK"
@@ -700,7 +701,8 @@ else:
             combined_df = pd.concat(all_dfs).reset_index(drop=True)
             
             # --- START CORRECTIE: UTC NAAR LOKALE TIJD (EUROPE/STOCKHOLM) ---
-            combined_df['Tijd (Lokaal)'] = combined_df['Tijd (UTC)'].dt.tz_localize('UTC').dt.tz_convert('Europe/Stockholm')
+            # De Tijd (UTC) kolom is al tz-aware, dus we gebruiken direct tz_convert
+            combined_df['Tijd (Lokaal)'] = combined_df['Tijd (UTC)'].dt.tz_convert('Europe/Stockholm')
             combined_time_column = 'Tijd (Lokaal)'
             # --- EINDE CORRECTIE ---
 
