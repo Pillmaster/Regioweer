@@ -433,7 +433,7 @@ else:
             tickformat="%d-%m %H:%M", 
             showgrid=True,
             gridcolor='#eeeeee',
-            title='Tijdstip (UTC)'
+            title='Tijd (Lokaal: CET/CEST)' # <- TITEL AANGEPAST
         )
         
         fig_historie.update_layout(
@@ -472,24 +472,36 @@ else:
         if all_dfs:
             combined_df = pd.concat(all_dfs).reset_index(drop=True)
             
+            # --- START CORRECTIE: UTC NAAR LOKALE TIJD (EUROPE/STOCKHOLM) ---
+            
+            # De kolom 'Tijd (UTC)' is al tz-aware (UTC) door pd.to_datetime in de API-functies. 
+            # We hoeven nu alleen direct te converteren om de TypeError op te lossen.
+            
+            # 1. Converteer de bestaande, tz-aware 'Tijd (UTC)' direct naar de lokale tijdzone
+            combined_df['Tijd (Lokaal)'] = combined_df['Tijd (UTC)'].dt.tz_convert('Europe/Stockholm')
+            # 2. Stel de nieuwe X-as kolomnaam in
+            combined_time_column = 'Tijd (Lokaal)'
+            
+            # --- EINDE CORRECTIE ---
+
             duration_seconds = (combined_df['Tijd (UTC)'].max() - combined_df['Tijd (UTC)'].min()).total_seconds()
             duration_hours = round(duration_seconds / 3600)
             
             st.subheader("Voorspelde Temperatuur (°C)") # <- Hoofdtitel
 
             # 2. Plaatsing beschrijving aangepast: NU onder de subheader
-            st.markdown(f"Toont de **voorspelde temperatuur** voor de komende **{duration_hours} uur** (1-uurs interval) op **{FORECAST_LAT:.4f} N, {FORECAST_LON:.4f} E** (nabij Graningen).")
+            st.markdown(f"Toont de **voorspelde temperatuur** voor de komende **{duration_hours} uur** (1-uurs interval) op **{FORECAST_LAT:.4f} N, {FORECAST_LON:.4f} E** (nabij Graningen). **Tijden in lokale zone (CET/CEST).**") # <- Beschrijving aangepast
 
             # 5. Plotten met Plotly Express 
             fig_voorspelling = px.line(
                 combined_df, 
-                x='Tijd (UTC)', 
+                x=combined_time_column, # <- GEWIJZIGDE KOLOM
                 y='Temperatuur (°C)', 
                 color='Bron', 
                 title=None,
                 markers=True,
                 hover_data={
-                    'Tijd (UTC)': "|%Y-%m-%d %H:%M",
+                    combined_time_column: "|%Y-%m-%d %H:%M", # <- GEWIJZIGDE KOLOM
                     'Temperatuur (°C)': ':.1f',
                     'Bron': True
                 }
@@ -501,14 +513,15 @@ else:
                 dtick=4 * 60 * 60 * 1000, # Toon labels om de 4 uur (in milliseconden)
                 showgrid=True,
                 gridcolor='#eeeeee',
-                title='Tijd (UTC)'
+                title='Tijd (Lokaal: CET/CEST)' # <- TITEL AANGEPAST
             )
             
             fig_voorspelling.add_hline(y=0, line_dash="dot", line_color="red", annotation_text="0°C")
 
 
             # 5b. Toevoegen van de verticale dagwissellijnen en datumannotaties
-            midnight_data = combined_df[combined_df['Tijd (UTC)'].dt.hour == 0].drop_duplicates(subset=['Tijd (UTC)'])
+            # De filtering moet nu op de LOKALE tijdkolom gebeuren
+            midnight_data = combined_df[combined_df[combined_time_column].dt.hour == 0].drop_duplicates(subset=[combined_time_column]) # <- GEWIJZIGDE KOLOM
 
             shapes = []
             annotations = []
@@ -517,7 +530,7 @@ else:
             max_y = combined_df['Temperatuur (°C)'].max() if not combined_df.empty else 5
 
             for index, row in midnight_data.iterrows():
-                day_start_time = row['Tijd (UTC)']
+                day_start_time = row[combined_time_column] # <- GEWIJZIGDE KOLOM
                 date_label = day_start_time.strftime('%d-%m')
                 
                 # 1. Verticale stippellijn
@@ -565,7 +578,8 @@ else:
                     st.info("Geen historische data beschikbaar om te tonen.")
                     
                 st.markdown(f"#### Voorspellingsdata (SMHI & YR.no)")
-                st.dataframe(combined_df.sort_values('Tijd (UTC)').head(100), use_container_width=True)
+                # Toon beide tijdskolommen in de ruwe data ter controle
+                st.dataframe(combined_df.sort_values(combined_time_column).head(100), use_container_width=True) # <- GEWIJZIGDE SORTERING
             
         else:
             st.warning("Kon geen voorspellingsgegevens ophalen van beide API's. Controleer de foutmeldingen hierboven.")
