@@ -499,7 +499,7 @@ with st.sidebar:
     long_term_forecast_enabled = st.checkbox("Toon Uitgebreide SMHI-voorspelling (7-10 dagen)", value=False) # <<< NIEUW
 
     st.divider()
-    st.markdown("ℹ️ Dashboard toont data van Trafikverket VViS.")
+    st.markdown("ℹ️ Dashboard toont data van Trafikverket VViS / Temperatur.nu.")
     st.markdown(f"Aantal beschikbare stations: **{len(STATIONS)}** (Vaste selectie)")
     st.markdown(f"Uw locatie (gesch.) gebruikt voor afstandsbepaling: **{UW_LAT:.3f} N, {UW_LON:.3f} E**")
 
