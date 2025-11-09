@@ -22,13 +22,15 @@ FORECAST_LON = 17.035304
 
 # CENTRALE STATIONSCONFIGURATIE
 STATIONS = {
+    "Graninge/Sjön": "graninge_sjon",    
     "Åkroken": "akroken",
-    "Fångsjöbacken": "fangsjobacken",
-    "Graninge": "graninge_tv", 
-    "Långsele": "langsele",
+    "Graninge": "graninge_tv",     
     "Ärtrik": "artrik",
-    "Sollefteå/Trästa": "trasta",
-    "Grillom": "grillom"
+    "Grillom": "grillom",
+    "Fångsjöbacken": "fangsjobacken",
+    "Långsele": "langsele",
+    "Sollefteå/Trästa": "trasta"
+    
 }
 
 # Mapping van de gebruiksvriendelijke labels naar de API-parameters
@@ -499,7 +501,7 @@ with st.sidebar:
     long_term_forecast_enabled = st.checkbox("Toon Uitgebreide SMHI-voorspelling (7-10 dagen)", value=False) # <<< NIEUW
 
     st.divider()
-    st.markdown("ℹ️ Dashboard toont data van Trafikverket VViS / Temperatur.nu.")
+    st.markdown("ℹ️ Dashboard toont data van Trafikverket VViS.")
     st.markdown(f"Aantal beschikbare stations: **{len(STATIONS)}** (Vaste selectie)")
     st.markdown(f"Uw locatie (gesch.) gebruikt voor afstandsbepaling: **{UW_LAT:.3f} N, {UW_LON:.3f} E**")
 
