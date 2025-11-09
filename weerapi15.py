@@ -16,7 +16,7 @@ REFRESH_COORDS_TTL = 3600 * 24 * 7 # 1 week
 # UW LOCATIE
 UW_LAT = 63.0243695749981
 UW_LON = 17.03321183785952
-# Locatie voor Voorspelling (Graningen, overgenomen uit grafiek5.py)
+# Locatie voor Voorspelling (Graninge, overgenomen uit grafiek5.py)
 FORECAST_LAT = 63.024625
 FORECAST_LON = 17.035304
 
@@ -501,7 +501,7 @@ with st.sidebar:
     long_term_forecast_enabled = st.checkbox("Toon Uitgebreide SMHI-voorspelling (7-10 dagen)", value=False) # <<< NIEUW
 
     st.divider()
-    st.markdown("ℹ️ Dashboard toont data van Trafikverket VViS.")
+    st.markdown("ℹ️ Dashboard toont data van Trafikverket VViS en temperatur.nu.")
     st.markdown(f"Aantal beschikbare stations: **{len(STATIONS)}** (Vaste selectie)")
     st.markdown(f"Uw locatie (gesch.) gebruikt voor afstandsbepaling: **{UW_LAT:.3f} N, {UW_LON:.3f} E**")
 
@@ -714,7 +714,7 @@ else:
             st.subheader("Voorspelde Temperatuur (°C)") 
 
             # 4. Plaatsing beschrijving aangepast
-            st.markdown(f"Toont de **voorspelde temperatuur** voor de komende **{duration_hours} uur** (1-uurs interval) op **{FORECAST_LAT:.4f} N, {FORECAST_LON:.4f} E** (nabij Graningen). **Tijden in lokale zone (CET/CEST).**")
+            st.markdown(f"Toont de **voorspelde temperatuur** voor de komende **{duration_hours} uur** (1-uurs interval) op **{FORECAST_LAT:.4f} N, {FORECAST_LON:.4f} E** (nabij Graninge). **Tijden in lokale zone (CET/CEST).**")
 
             # 5. Plotten met Plotly Express 
             fig_voorspelling = px.line(
