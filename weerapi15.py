@@ -27,7 +27,7 @@ STATIONS = {
     "Graninge": "graninge_tv",     
     "Ärtrik": "artrik",
     "Grillom": "grillom",
-    "Bipsgarden": "fors_tv",
+    "Bispgården": "fors_tv",
     "Kramfors Norr": "kramfors_norr",
     "Sillre": "sillre",
     "Fångsjöbacken": "fangsjobacken",
